@@ -98,6 +98,14 @@ Goodbye!
 
 ## Installation
 
+### Quick Install (One-liner)
+
+```bash
+curl -o rotate.py https://raw.githubusercontent.com/kereilly58/rotate-jpeg/main/rotate.py && chmod +x rotate.py
+```
+
+### Full Installation
+
 1. Clone this repository:
 ```bash
 git clone https://github.com/kereilly58/rotate-jpeg.git
