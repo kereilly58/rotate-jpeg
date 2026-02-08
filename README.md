@@ -10,8 +10,10 @@ A fast, optimized command-line tool to rotate JPEG and PNG images with automatic
 - **Two modes:**
   - Single rotation mode - rotate one image and exit
   - Interactive mode (-p flag) - process multiple images continuously
+- **Finder integration (macOS)** - select files in Finder, type just the rotation direction
 - **Optimized for speed** - caching and fast file operations
 - **Smart backup handling** - unique filenames to prevent overwrites
+- **Robust error handling** - validates files, handles permissions, prevents data loss
 - **Drag-and-drop friendly** - handles file paths with spaces and special characters
 
 ## Requirements
@@ -46,7 +48,11 @@ Process multiple images continuously:
 ./rotate.py -p
 ```
 
-In interactive mode, just drag and drop files from Finder and type the direction. Type `exit`, `quit`, or `q` to stop.
+In interactive mode, you have two options:
+1. **Finder integration (macOS):** Select a file in Finder, then just type the direction (`r`, `l`, or `f`)
+2. **Traditional:** Drag and drop files or type the full path followed by the direction
+
+Type `exit`, `quit`, or `q` to stop.
 
 ## Rotation Directions
 
@@ -63,7 +69,20 @@ In interactive mode, just drag and drop files from Finder and type the direction
 ./rotate.py picture.jpeg f           # Flip 180°
 ```
 
-**Interactive mode:**
+**Interactive mode with Finder selection (macOS):**
+```bash
+./rotate.py -p
+# Select a file in Finder, then just type the direction:
+>> r
+Using Finder selection: photo.jpg
+✓ Rotated /Volumes/photos/photo.jpg (r)
+  Original backed up to: /Volumes/photos/rotate_bkup/photo.jpg
+
+>> exit
+Goodbye!
+```
+
+**Interactive mode with full paths:**
 ```bash
 ./rotate.py -p
 >> /Volumes/photos/image1.jpg r
@@ -88,6 +107,15 @@ Goodbye!
 
 - JPEG (`.jpg`, `.jpeg`) - case-insensitive
 - PNG (`.png`)
+
+## Error Handling & Safety
+
+- **Automatic temp file cleanup** - no orphaned files on errors
+- **Backup verification** - ensures backups succeed before replacing originals
+- **Permission checks** - validates write access before operations
+- **File validation** - verifies output files are not empty or corrupted
+- **Fallback backup location** - uses `~/rotate_bkup` if local directory isn't writable
+- **Timeout protection** - won't hang if Finder is unresponsive
 
 ## Performance Optimizations
 

@@ -34,12 +34,15 @@ def ensure_backup_dir(file_dir):
     except (OSError, PermissionError):
         # Fallback to home directory if we can't create directory locally
         home_backup_dir = os.path.expanduser('~/rotate_bkup')
-        if not os.path.exists(home_backup_dir):
-            os.makedirs(home_backup_dir)
-        print(f"Note: Cannot create backup directory at {backup_dir}")
-        print(f"      Using fallback location: {home_backup_dir}")
-        _backup_dir_cache[file_dir] = home_backup_dir
-        return home_backup_dir
+        try:
+            if not os.path.exists(home_backup_dir):
+                os.makedirs(home_backup_dir)
+            print(f"Note: Cannot create backup directory at {backup_dir}")
+            print(f"      Using fallback location: {home_backup_dir}")
+            _backup_dir_cache[file_dir] = home_backup_dir
+            return home_backup_dir
+        except (OSError, PermissionError) as e:
+            raise RuntimeError(f"Cannot create backup directory. Tried:\n  {backup_dir}\n  {home_backup_dir}\nError: {e}")
 
 def get_unique_backup_path(backup_dir, filename):
     """Generate a unique backup filename if file already exists."""
@@ -50,14 +53,17 @@ def get_unique_backup_path(backup_dir, filename):
     if not os.path.exists(backup_path):
         return backup_path
 
-    # If file exists, append counter
+    # If file exists, append counter (with safety limit)
     counter = 1
-    while True:
+    max_attempts = 10000
+    while counter < max_attempts:
         new_filename = f"{base_name}_{counter}{ext}"
         backup_path = os.path.join(backup_dir, new_filename)
         if not os.path.exists(backup_path):
             return backup_path
         counter += 1
+
+    raise RuntimeError(f"Cannot create unique backup filename after {max_attempts} attempts")
 
 def get_file_type(filepath):
     """Determine file type based on extension."""
@@ -69,6 +75,40 @@ def get_file_type(filepath):
     else:
         return None
 
+def get_finder_selection():
+    """Get the currently selected file in Finder using AppleScript."""
+    script = '''
+    tell application "Finder"
+        set selectedItems to selection
+        if (count of selectedItems) is 0 then
+            return ""
+        end if
+        set firstItem to item 1 of selectedItems
+        return POSIX path of (firstItem as alias)
+    end tell
+    '''
+
+    try:
+        result = subprocess.run(
+            ['osascript', '-e', script],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5  # 5 second timeout
+        )
+        path = result.stdout.strip()
+
+        # Validate it's a file, not a directory
+        if path and os.path.isdir(path):
+            return None  # Signal that selection is not a file
+
+        return path
+    except subprocess.TimeoutExpired:
+        print("Warning: Finder not responding")
+        return None
+    except subprocess.CalledProcessError:
+        return None
+
 def rotate_with_jpegtran(filepath, direction, rotation_angle):
     """Rotate JPEG using jpegtran."""
     # Compute paths once
@@ -76,8 +116,13 @@ def rotate_with_jpegtran(filepath, direction, rotation_angle):
     file_dir = os.path.dirname(abs_filepath)
     filename = os.path.basename(abs_filepath)
 
-    with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False, dir=file_dir) as tmp:
-        tmp_path = tmp.name
+    # Check if temp directory is writable
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False, dir=file_dir) as tmp:
+            tmp_path = tmp.name
+    except (OSError, PermissionError) as e:
+        print(f"Error: Cannot create temporary file in {file_dir}: {e}")
+        return False
 
     try:
         # Run jpegtran
@@ -94,12 +139,29 @@ def rotate_with_jpegtran(filepath, direction, rotation_angle):
 
         if result.returncode != 0:
             print(f"Error running jpegtran: {result.stderr}")
+            # Clean up temp file
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            return False
+
+        # Verify temp file was created and has content
+        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+            print("Error: Rotation produced empty or missing file")
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
             return False
 
         # Copy original to backup directory before replacing
         backup_dir = ensure_backup_dir(file_dir)
         backup_path = get_unique_backup_path(backup_dir, filename)
-        shutil.copy(abs_filepath, backup_path)  # Use copy instead of copy2 for speed
+
+        try:
+            shutil.copy(abs_filepath, backup_path)
+        except (OSError, PermissionError, shutil.Error) as e:
+            print(f"Error: Cannot create backup: {e}")
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            return False
 
         # Replace original with rotated version
         os.replace(tmp_path, abs_filepath)
@@ -107,11 +169,17 @@ def rotate_with_jpegtran(filepath, direction, rotation_angle):
         print(f"  Original backed up to: {backup_path}")
         return True
 
-    except Exception as e:
+    except (OSError, RuntimeError) as e:
         # Clean up temp file if something went wrong
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
         print(f"Error: {e}")
+        return False
+    except Exception as e:
+        # Catch unexpected errors
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        print(f"Unexpected error: {e}")
         return False
 
 def rotate_with_imagemagick(filepath, direction, rotation_angle):
@@ -121,8 +189,13 @@ def rotate_with_imagemagick(filepath, direction, rotation_angle):
     file_dir = os.path.dirname(abs_filepath)
     filename = os.path.basename(abs_filepath)
 
-    with tempfile.NamedTemporaryFile(suffix='.png', delete=False, dir=file_dir) as tmp:
-        tmp_path = tmp.name
+    # Check if temp directory is writable
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False, dir=file_dir) as tmp:
+            tmp_path = tmp.name
+    except (OSError, PermissionError) as e:
+        print(f"Error: Cannot create temporary file in {file_dir}: {e}")
+        return False
 
     try:
         # Run ImageMagick 7 (magick command)
@@ -138,12 +211,29 @@ def rotate_with_imagemagick(filepath, direction, rotation_angle):
 
         if result.returncode != 0:
             print(f"Error running ImageMagick: {result.stderr}")
+            # Clean up temp file
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            return False
+
+        # Verify temp file was created and has content
+        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+            print("Error: Rotation produced empty or missing file")
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
             return False
 
         # Copy original to backup directory before replacing
         backup_dir = ensure_backup_dir(file_dir)
         backup_path = get_unique_backup_path(backup_dir, filename)
-        shutil.copy(abs_filepath, backup_path)  # Use copy instead of copy2 for speed
+
+        try:
+            shutil.copy(abs_filepath, backup_path)
+        except (OSError, PermissionError, shutil.Error) as e:
+            print(f"Error: Cannot create backup: {e}")
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            return False
 
         # Replace original with rotated version
         os.replace(tmp_path, abs_filepath)
@@ -151,11 +241,17 @@ def rotate_with_imagemagick(filepath, direction, rotation_angle):
         print(f"  Original backed up to: {backup_path}")
         return True
 
-    except Exception as e:
+    except (OSError, RuntimeError) as e:
         # Clean up temp file if something went wrong
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
         print(f"Error: {e}")
+        return False
+    except Exception as e:
+        # Catch unexpected errors
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        print(f"Unexpected error: {e}")
         return False
 
 def rotate_image(filepath, direction):
@@ -178,7 +274,9 @@ def rotate_image(filepath, direction):
     # Check file type
     file_type = get_file_type(filepath)
     if file_type is None:
-        print("Error: Currently only jpeg and png files are supported")
+        ext = os.path.splitext(filepath)[1] or "(no extension)"
+        print(f"Error: Unsupported file type '{ext}'")
+        print("Supported formats: .jpg, .jpeg, .png")
         return False
 
     # Route to appropriate rotation function based on file type
@@ -187,11 +285,14 @@ def rotate_image(filepath, direction):
     elif file_type == 'png':
         return rotate_with_imagemagick(filepath, direction, rotation_map[direction])
 
+    return False
+
 def interactive_mode():
     """Run in interactive/persistent mode."""
     print("Interactive Image Rotation Tool")
     print("=" * 40)
     print("Enter: <image_path> <direction>")
+    print("Or just: <direction> (uses Finder selection)")
     print("Direction: l (left), r (right), f (flip)")
     print("Type 'exit' or 'quit' to stop")
     print("=" * 40)
@@ -211,19 +312,36 @@ def interactive_mode():
             if not user_input:
                 continue
 
-            # Parse input - handle paths with spaces
-            # The direction is always the last word, filepath is everything before it
             parts = user_input.split()
-            if len(parts) < 2:
-                print("Error: Please provide <image_path> <direction>")
+
+            # If only one word and it's a direction, use Finder selection
+            if len(parts) == 1 and parts[0].lower() in ['l', 'r', 'f']:
+                direction = parts[0].lower()
+                filepath = get_finder_selection()
+
+                if not filepath:
+                    print("Error: No file selected in Finder, or selection is a folder")
+                    print("Tip: Select a single file in Finder, then type the direction")
+                    continue
+
+                # Validate it's actually a file
+                if not os.path.isfile(filepath):
+                    print(f"Error: Selected item is not a file: {filepath}")
+                    continue
+
+                print(f"Using Finder selection: {os.path.basename(filepath)}")
+            elif len(parts) >= 2:
+                # Original behavior: filepath + direction
+                direction = parts[-1].lower()
+                filepath = ' '.join(parts[:-1])
+
+                # Remove escape characters that macOS adds when dragging files
+                filepath = filepath.replace('\\ ', ' ').replace("\\'", "'")
+            else:
+                print("Error: Please provide <direction> or <image_path> <direction>")
+                print("Example: r  (rotates Finder selection)")
                 print("Example: /path/to/image.jpg r")
                 continue
-
-            direction = parts[-1].lower()
-            filepath = ' '.join(parts[:-1])
-
-            # Remove escape characters that macOS adds when dragging files
-            filepath = filepath.replace('\\ ', ' ').replace("\\'", "'")
 
             # Rotate the image
             rotate_image(filepath, direction)
